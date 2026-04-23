@@ -41,25 +41,26 @@ def pick_prompt(prompts, prompt_id=None):
     return random.choice(prompts)
 
 
+def escape_html(text):
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def build_caption(prompt):
-    title    = prompt.get("title") or prompt.get("text", "")[:60]
-    category = prompt.get("category", "prompt").upper()
-    return f"🧠 *{title}*\n\n📂 #{category} #aiprompt #promptlab"
+    title    = escape_html(prompt.get("title") or prompt.get("text", "")[:60])
+    category = prompt.get("category", "prompt").lower()
+    return f"🧠 <b>{title}</b>\n\n📂 #{category} #aiprompt #promptlab"
 
 
 def build_text(prompt):
-    text = prompt.get("text", "").strip()
-    # Escape caratteri Markdown problematici
-    for ch in ["_", "*", "[", "]", "`"]:
-        text = text.replace(ch, f"\\{ch}")
-    return f"📝 *Prompt:*\n\n{text}\n\n🔗 [fabiofidone\\.it](https://www.fabiofidone.it)"
+    text = escape_html(prompt.get("text", "").strip())
+    return f"📝 <b>Prompt:</b>\n\n{text}\n\n🔗 <a href=\"https://www.fabiofidone.it\">fabiofidone.it</a>"
 
 
 def send_photo(caption):
     with open(BANNER_FILE, "rb") as img:
         resp = requests.post(
             f"{BASE}/sendPhoto",
-            data={"chat_id": CHAT_ID, "caption": caption, "parse_mode": "MarkdownV2"},
+            data={"chat_id": CHAT_ID, "caption": caption, "parse_mode": "HTML"},
             files={"photo": img},
             timeout=30,
         )
@@ -72,7 +73,7 @@ def send_photo(caption):
 def send_text(text):
     resp = requests.post(
         f"{BASE}/sendMessage",
-        json={"chat_id": CHAT_ID, "text": text, "parse_mode": "MarkdownV2"},
+        json={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"},
         timeout=15,
     )
     if not resp.ok:
