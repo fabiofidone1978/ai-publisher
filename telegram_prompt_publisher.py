@@ -14,13 +14,17 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent / ".env")
 
-TOKEN        = os.getenv("TELEGRAM_BOT_TOKEN")
-CHAT_ID      = os.getenv("TELEGRAM_CHAT_ID")
-PROMPTS_URL  = os.getenv("PROMPTS_URL", "https://www.fabiofidone.it/data/aiprompts.json")
-PROMPTS_FILE = Path(__file__).parent / "data" / "aiprompts.json"
-BANNER_FILE  = Path(__file__).parent / "data" / "telegram_banner.png"
-BASE         = f"https://api.telegram.org/bot{TOKEN}"
-REF_DATE     = date(2026, 1, 1)
+TOKEN              = os.getenv("TELEGRAM_BOT_TOKEN")
+CHAT_ID            = os.getenv("TELEGRAM_CHAT_ID")
+PROMOFINDER_CHAT   = os.getenv("PROMOFINDER_CHAT_ID")
+PROMOFINDER_URL    = os.getenv("PROMOFINDER_URL", "https://www.promofinder.it")
+PROMPTS_URL        = os.getenv("PROMPTS_URL", "https://www.fabiofidone.it/data/aiprompts.json")
+PROMPTS_FILE       = Path(__file__).parent / "data" / "aiprompts.json"
+BANNER_FILE        = Path(__file__).parent / "data" / "telegram_banner.png"
+BANNER_PROMO_FILE  = Path(__file__).parent / "data" / "banner_promo_promofinder.png"
+BASE               = f"https://api.telegram.org/bot{TOKEN}"
+REF_DATE           = date(2026, 1, 1)
+CROSSPROMO_EVERY   = 10   # ogni N post → promo PromoFinder
 
 SLOTS = [
     {"id": 0, "label": "Prompt del Mattino",  "emoji": "🌅", "utc_hour": 7},
@@ -51,6 +55,12 @@ def get_prompt(prompts, d=None, slot=None):
     si = slot if slot is not None else current_slot()
     idx = (di * 3 + si) % len(prompts)
     return prompts[idx], si
+
+
+def is_crosspromo_turn(slot=None):
+    di = day_index()
+    si = slot if slot is not None else current_slot()
+    return (di * 3 + si) % CROSSPROMO_EVERY == 0
 
 
 # ── Caricamento prompt ──────────────────────────────────────────────────────
@@ -104,6 +114,16 @@ def build_text(prompt):
     )
 
 
+def build_crosspromo_promofinder():
+    return (
+        "💸 <b>Risparmia ogni giorno con PromoFinder!</b>\n\n"
+        "Codici sconto, offerte esclusive e cashback selezionati per te.\n"
+        "Migliaia di brand italiani e internazionali.\n\n"
+        "👉 Unisciti al canale e non perdere nessuna promozione!\n\n"
+        f"🔗 <a href=\"{PROMOFINDER_URL}\">promofinder.it</a>"
+    )
+
+
 def build_weekly_recap(prompts):
     today = date.today()
     lines = ["📅 <b>Prompt della Settimana</b>\n\nI migliori prompt di questa settimana su AI Prompt Lab ITA:\n"]
@@ -119,8 +139,8 @@ def build_weekly_recap(prompts):
 
 # ── Invio Telegram ──────────────────────────────────────────────────────────
 
-def send_photo(caption):
-    with open(BANNER_FILE, "rb") as img:
+def send_photo(caption, banner=None):
+    with open(banner or BANNER_FILE, "rb") as img:
         resp = requests.post(
             f"{BASE}/sendPhoto",
             data={"chat_id": CHAT_ID, "caption": caption, "parse_mode": "HTML"},
@@ -177,12 +197,22 @@ def main():
 
     prompt, slot_id = get_prompt(prompts, slot=args.slot)
     title = prompt.get("title") or prompt.get("text", "")[:60]
-    print(f"Slot {slot_id} — {SLOTS[slot_id]['label']}: {title}")
 
+    if is_crosspromo_turn(args.slot):
+        print(f"Slot {slot_id} — CROSS-PROMO PromoFinder")
+        if BANNER_PROMO_FILE.exists():
+            send_photo(
+                "💸 <b>Risparmia ogni giorno!</b>\n\n#offerte #codici #risparmio #promofinder",
+                banner=BANNER_PROMO_FILE
+            )
+        send_text(build_crosspromo_promofinder())
+        print(f"[OK] Cross-promo PromoFinder inviata a {CHAT_ID}")
+        return
+
+    print(f"Slot {slot_id} — {SLOTS[slot_id]['label']}: {title}")
     if BANNER_FILE.exists():
         send_photo(build_caption(prompt, slot_id))
         print("[OK] Banner inviato")
-
     send_text(build_text(prompt))
     print(f"[OK] Prompt inviato a {CHAT_ID}")
 

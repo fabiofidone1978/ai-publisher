@@ -6,42 +6,67 @@ on:
     - cron: "0 12 * * 1-5"   # 13:00 IT  — Lun-Ven (pausa pranzo)
     - cron: "30 17 * * 1-5"  # 18:30 IT  — Lun-Ven (sera)
     - cron: "0 7 * * 6"      # 08:00 IT  — Sabato  (recap settimanale)
+    - cron: "0 8 * * 1,4"    # 09:00 IT  — Lun+Gio (cross-promo su PromoFinder)
   workflow_dispatch:
     inputs:
       slot:
-        description: "Slot da pubblicare (0=mattino, 1=pausa, 2=sera)"
+        description: "Slot (0=mattino 1=pausa 2=sera)"
         required: false
         default: ""
       recap:
         description: "Forza recap settimanale (true/false)"
         required: false
         default: "false"
+      crosspromo:
+        description: "Forza cross-promo su PromoFinder (true/false)"
+        required: false
+        default: "false"
 
 jobs:
-  publish:
+  # ── AI Prompt Lab: pubblica prompt o cross-promo PromoFinder ─────────────
+  publish-prompt:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'schedule' &&
+       (contains(fromJSON('["0 7 * * 1-5","0 12 * * 1-5","30 17 * * 1-5","0 7 * * 6"]'),
+        github.event.schedule) || true))
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Installa dipendenze
-        run: pip install requests python-dotenv Pillow
-
-      - name: Pubblica prompt su Telegram
+      - run: pip install requests python-dotenv Pillow
+      - name: Pubblica su AI Prompt Lab
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          PROMOFINDER_CHAT_ID: ${{ secrets.PROMOFINDER_CHAT_ID }}
+          PROMOFINDER_URL:    ${{ secrets.PROMOFINDER_URL }}
         run: |
-          ARGS=""
-          if [ "${{ github.event.inputs.recap }}" = "true" ]; then
-            ARGS="--recap"
-          elif [ -n "${{ github.event.inputs.slot }}" ]; then
-            ARGS="--slot ${{ github.event.inputs.slot }}"
+          if [ "${{ github.event.inputs.crosspromo }}" = "true" ]; then
+            python telegram_crosspromo.py
+          else
+            ARGS=""
+            [ "${{ github.event.inputs.recap }}" = "true" ] && ARGS="--recap"
+            [ -n "${{ github.event.inputs.slot }}" ] && ARGS="--slot ${{ github.event.inputs.slot }}"
+            python telegram_prompt_publisher.py $ARGS
           fi
-          python telegram_prompt_publisher.py $ARGS
+
+  # ── Cross-promo: pubblica promo AI Prompt Lab su canale PromoFinder ──────
+  crosspromo-promofinder:
+    if: >
+      github.event_name == 'schedule' &&
+      github.event.schedule == '0 8 * * 1,4'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests python-dotenv
+      - name: Cross-promo AI Prompt Lab su PromoFinder
+        env:
+          TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          PROMOFINDER_CHAT_ID: ${{ secrets.PROMOFINDER_CHAT_ID }}
+        run: python telegram_crosspromo.py
