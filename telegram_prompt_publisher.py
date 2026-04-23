@@ -55,14 +55,27 @@ def get_prompt(prompts, d=None, slot=None):
 
 # ── Caricamento prompt ──────────────────────────────────────────────────────
 
+def is_readable(prompt):
+    text = prompt.get("text", "").strip()
+    if not text or len(text) < 30:
+        return False
+    if text.startswith("{") or text.startswith("["):
+        return False
+    return True
+
+
 def load_prompts():
     if PROMPTS_FILE.exists():
         with open(PROMPTS_FILE, encoding="utf-8") as f:
-            return json.load(f).get("items", [])
-    print(f"File locale assente, scarico da {PROMPTS_URL}...")
-    resp = requests.get(PROMPTS_URL, timeout=15)
-    resp.raise_for_status()
-    return resp.json().get("items", [])
+            raw = json.load(f).get("items", [])
+    else:
+        print(f"File locale assente, scarico da {PROMPTS_URL}...")
+        resp = requests.get(PROMPTS_URL, timeout=15)
+        resp.raise_for_status()
+        raw = resp.json().get("items", [])
+    prompts = [p for p in raw if is_readable(p)]
+    print(f"Prompt validi: {len(prompts)} / {len(raw)}")
+    return prompts
 
 
 # ── Formattazione messaggi ──────────────────────────────────────────────────
