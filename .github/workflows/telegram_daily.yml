@@ -1,0 +1,28 @@
+name: Telegram Prompt Publisher
+
+on:
+  schedule:
+    - cron: "0 8 * * *"   # ogni giorno alle 09:00 ora italiana (UTC+1)
+  workflow_dispatch:        # esecuzione manuale dal tab Actions
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Installa dipendenze
+        run: pip install requests python-dotenv Pillow
+
+      - name: Pubblica prompt su Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python telegram_prompt_publisher.py

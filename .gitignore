@@ -1,0 +1,11 @@
+# Credenziali — MAI nel repo
+.env
+
+# Cache e log
+logs/
+json_news/
+__pycache__/
+*.pyc
+
+# Stato runtime
+linkedin_publisher_state.json
