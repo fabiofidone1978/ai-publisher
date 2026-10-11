@@ -12,6 +12,49 @@ os.environ.setdefault("TELEGRAM_CHAT_ID", "@test")
 import telegram_prompt_publisher as tp  # noqa: E402
 
 
+class PlaceholderFilterTests(unittest.TestCase):
+    @staticmethod
+    def _load_raw():
+        import json
+        with open(ROOT / "data" / "aiprompts.json", encoding="utf-8") as f:
+            return json.load(f)["items"]
+
+    def test_futuro_senza_segnaposto_passato_invariato(self):
+        raw = self._load_raw()
+        base = [p for p in raw if tp.is_readable(p)]
+        out = tp.filter_prompts(raw)
+        cut_at = tp.OLD_END_INDEX + 1
+        self.assertEqual(out[:cut_at], base[:cut_at])                       # parte gia pubblicata identica
+        self.assertTrue(all(not tp.PLACEHOLDER.search(p["text"]) for p in out[cut_at:]))
+        self.assertGreater(len(out[cut_at:]), 900)                           # abbastanza prompt per oltre 9 mesi
+
+    def test_nessun_prompt_futuro_con_segnaposto_nel_primo_anno(self):
+        prompts = tp.filter_prompts(self._load_raw())
+        d = tp.REF_NEW
+        for _ in range(365):
+            for s in range(tp.SLOTS_PER_DAY):
+                p, _slot = tp.get_prompt(prompts, d=d, slot=s)
+                self.assertFalse(tp.PLACEHOLDER.search(p["text"]), p["text"][:60])
+            d += timedelta(days=1)
+
+    def test_dopo_il_giro_riparte_solo_dai_puliti(self):
+        prompts = tp.filter_prompts(self._load_raw())
+        total = len(prompts)
+        for n in (total - 1, total, total + 1, total * 3 + 17):
+            pos = tp.prompt_position(n, total)
+            self.assertGreaterEqual(pos, tp.OLD_END_INDEX + 1)
+            self.assertFalse(tp.PLACEHOLDER.search(prompts[pos]["text"]))
+        self.assertEqual(tp.prompt_position(100, total), 100)               # i vecchi indici restano uguali
+
+    def test_ciclo_pulito_sufficiente(self):
+        prompts = tp.filter_prompts(self._load_raw())
+        self.assertGreater(len(prompts) - tp.OLD_END_INDEX - 1, 1200)       # oltre 50 settimane senza ripetere
+
+    def test_segnaposto_riconosciuto(self):
+        self.assertTrue(tp.PLACEHOLDER.search("per un ${job_title} in ${industry}"))
+        self.assertFalse(tp.PLACEHOLDER.search("costa 5$ {non e un segnaposto}"))
+
+
 class NumberingTests(unittest.TestCase):
     def test_continuita_con_il_vecchio_schema(self):
         # ultimo giorno col vecchio schema: 22/06/2026 slot 2 -> indice 518; il primo nuovo deve essere 519

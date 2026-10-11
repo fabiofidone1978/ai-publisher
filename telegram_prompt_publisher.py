@@ -11,6 +11,7 @@ Uso:  python telegram_prompt_publisher.py --slot N      pubblica lo slot N (0 ma
 """
 
 import os
+import re
 import sys
 import json
 import time
@@ -77,9 +78,17 @@ def post_number(d, si):
     return OLD_END_INDEX + 1 + (d - REF_NEW).days * SLOTS_PER_DAY + si
 
 
+def prompt_position(n, total):
+    """Posizione nell'elenco per il post numero n. Finito l'elenco il ciclo riparte da OLD_END_INDEX + 1
+    (solo prompt puliti), non dall'inizio che contiene anche quelli con segnaposto."""
+    if n < total:
+        return n
+    return OLD_END_INDEX + 1 + (n - total) % (total - OLD_END_INDEX - 1)
+
+
 def get_prompt(prompts, d=None, slot=None):
     si = slot if slot is not None else current_slot()
-    return prompts[post_number(d, si) % len(prompts)], si
+    return prompts[prompt_position(post_number(d, si), len(prompts))], si
 
 
 def is_crosspromo_turn(slot=None):
@@ -107,8 +116,26 @@ def load_prompts():
         resp = requests.get(PROMPTS_URL, timeout=15)
         resp.raise_for_status()
         raw = resp.json().get("items", [])
-    prompts = [p for p in raw if is_readable(p)]
-    print(f"Prompt validi: {len(prompts)} / {len(raw)}")
+    return filter_prompts(raw)
+
+
+PLACEHOLDER = re.compile(r"\$\{[^}]*\}")     # segnaposto non compilati, es. ${job_title}
+
+
+def filter_prompts(raw):
+    """Prompt leggibili, senza segnaposto ${...} nella parte ANCORA NON PUBBLICATA.
+
+    La parte gia usata (indici 0..OLD_END_INDEX) resta identica: se togliessi i segnaposto da tutto
+    l'elenco le posizioni si sposterebbero e prompt gia pubblicati potrebbero ripresentarsi."""
+    base = [p for p in raw if is_readable(p)]
+    used = base[: OLD_END_INDEX + 1]
+    rest = [p for p in base[OLD_END_INDEX + 1:] if not PLACEHOLDER.search(p.get("text", ""))]
+    # In coda i prompt gia usati MA puliti: finiti i nuovi (circa 8 mesi) il ciclo riparte da questi,
+    # mai dai prompt con segnaposto.
+    clean_used = [p for p in used if not PLACEHOLDER.search(p.get("text", ""))]
+    prompts = used + rest + clean_used
+    print(f"Prompt validi: {len(used) + len(rest)} / {len(raw)} (esclusi {len(base) - len(used) - len(rest)} "
+          f"con segnaposto); ciclo pulito di {len(rest) + len(clean_used)} prompt")
     return prompts
 
 
