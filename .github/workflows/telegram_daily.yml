@@ -1,16 +1,23 @@
 name: Telegram Prompt Publisher
 
+# Orari in UTC (in Italia +1 in inverno, +2 in estate). Ogni cron indica ESPLICITAMENTE lo slot da
+# pubblicare: un ritardo di GitHub non sposta piu il prompt e nessun cron produce doppioni.
 on:
   schedule:
-    - cron: "0 7 * * 1-5"    # 08:00 IT  — Lun-Ven (mattino)
-    - cron: "0 12 * * 1-5"   # 13:00 IT  — Lun-Ven (pausa pranzo)
-    - cron: "30 17 * * 1-5"  # 18:30 IT  — Lun-Ven (sera)
-    - cron: "0 7 * * 6"      # 08:00 IT  — Sabato  (recap settimanale)
-    - cron: "0 8 * * 1,4"    # 09:00 IT  — Lun+Gio (cross-promo su PromoFinder)
+    - cron: "0 7 * * 1-5"    # slot 0 mattino   — Lun-Ven
+    - cron: "0 12 * * 1-5"   # slot 1 pausa     — Lun-Ven
+    - cron: "30 17 * * 1-5"  # slot 2 sera      — Lun-Ven
+    - cron: "30 19 * * 1-5"  # slot 3 notte     — Lun-Ven
+    - cron: "0 7 * * 6"      # recap settimanale — Sabato mattina
+    - cron: "30 17 * * 6"    # slot 2 sera      — Sabato
+    - cron: "0 8 * * 0"      # slot 0 mattino   — Domenica
+    - cron: "30 17 * * 0"    # slot 2 sera      — Domenica
+    - cron: "0 8 * * 1,4"    # cross-promo su PromoFinder — Lun+Gio
+    - cron: "0 6 * * 1"      # keepalive: riattiva il workflow prima dello stop per inattivita
   workflow_dispatch:
     inputs:
       slot:
-        description: "Slot (0=mattino 1=pausa 2=sera)"
+        description: "Slot (0=mattino 1=pausa 2=sera 3=notte)"
         required: false
         default: ""
       recap:
@@ -21,16 +28,34 @@ on:
         description: "Forza cross-promo su PromoFinder (true/false)"
         required: false
         default: "false"
+      dry:
+        description: "Prova a secco: non invia nulla (true/false)"
+        required: false
+        default: "false"
+      check:
+        description: "Solo verifica token/canale/permessi (true/false)"
+        required: false
+        default: "false"
+
+# GitHub spegne i workflow programmati dopo 60 giorni senza attivita: e successo il 22/06/2026.
+# Il job "keepalive" sotto lo riattiva ogni lunedi; il server segnala via WhatsApp se si ferma comunque.
+permissions:
+  contents: read
+
+concurrency:
+  group: telegram-prompt-lab
+  cancel-in-progress: false
 
 jobs:
-  # ── AI Prompt Lab: pubblica prompt o cross-promo PromoFinder ─────────────
+  # ── AI Prompt Lab: pubblica prompt o recap ───────────────────────────────
   publish-prompt:
     if: >
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'schedule' &&
-       (contains(fromJSON('["0 7 * * 1-5","0 12 * * 1-5","30 17 * * 1-5","0 7 * * 6"]'),
-        github.event.schedule) || true))
+       github.event.schedule != '0 8 * * 1,4' &&
+       github.event.schedule != '0 6 * * 1')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -43,15 +68,38 @@ jobs:
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           PROMOFINDER_CHAT_ID: ${{ secrets.PROMOFINDER_CHAT_ID }}
           PROMOFINDER_URL:    ${{ secrets.PROMOFINDER_URL }}
+          EVENT:              ${{ github.event_name }}
+          SCHEDULE:           ${{ github.event.schedule }}
+          IN_SLOT:            ${{ github.event.inputs.slot }}
+          IN_RECAP:           ${{ github.event.inputs.recap }}
+          IN_CROSS:           ${{ github.event.inputs.crosspromo }}
+          IN_DRY:             ${{ github.event.inputs.dry }}
+          IN_CHECK:           ${{ github.event.inputs.check }}
         run: |
-          if [ "${{ github.event.inputs.crosspromo }}" = "true" ]; then
-            python telegram_crosspromo.py
-          else
-            ARGS=""
-            [ "${{ github.event.inputs.recap }}" = "true" ] && ARGS="--recap"
-            [ -n "${{ github.event.inputs.slot }}" ] && ARGS="--slot ${{ github.event.inputs.slot }}"
-            python telegram_prompt_publisher.py $ARGS
+          ARGS=""
+          [ "$IN_DRY" = "true" ] && ARGS="$ARGS --dry"
+          if [ "$IN_CHECK" = "true" ]; then
+            python telegram_prompt_publisher.py --check
+            exit $?
           fi
+          if [ "$IN_CROSS" = "true" ]; then
+            python telegram_crosspromo.py
+            exit $?
+          fi
+          if [ "$EVENT" = "schedule" ]; then
+            case "$SCHEDULE" in
+              "0 7 * * 1-5"|"0 8 * * 0")                      ARGS="$ARGS --slot 0" ;;
+              "0 12 * * 1-5")                                  ARGS="$ARGS --slot 1" ;;
+              "30 17 * * 1-5"|"30 17 * * 6"|"30 17 * * 0")     ARGS="$ARGS --slot 2" ;;
+              "30 19 * * 1-5")                                 ARGS="$ARGS --slot 3" ;;
+              "0 7 * * 6")                                     ARGS="$ARGS --recap" ;;
+              *) echo "cron sconosciuto: $SCHEDULE"; exit 1 ;;
+            esac
+          else
+            [ "$IN_RECAP" = "true" ] && ARGS="$ARGS --recap"
+            [ -n "$IN_SLOT" ] && ARGS="$ARGS --slot $IN_SLOT"
+          fi
+          python telegram_prompt_publisher.py $ARGS
 
   # ── Cross-promo: pubblica promo AI Prompt Lab su canale PromoFinder ──────
   crosspromo-promofinder:
@@ -59,6 +107,7 @@ jobs:
       github.event_name == 'schedule' &&
       github.event.schedule == '0 8 * * 1,4'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -67,6 +116,21 @@ jobs:
       - run: pip install requests python-dotenv
       - name: Cross-promo AI Prompt Lab su PromoFinder
         env:
-          TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           PROMOFINDER_CHAT_ID: ${{ secrets.PROMOFINDER_CHAT_ID }}
         run: python telegram_crosspromo.py
+
+  # ── Keepalive: GitHub spegne i cron dopo 60 giorni di inattivita ─────────
+  keepalive:
+    if: >
+      github.event_name == 'schedule' &&
+      github.event.schedule == '0 6 * * 1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Riattiva il workflow (azzera il contatore di inattivita)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/telegram_daily.yml/enable"

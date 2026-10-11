@@ -1,11 +1,19 @@
 """
 Telegram Prompt Publisher — AI Prompt Lab ITA
-Pubblica prompt in modo deterministico su 3 fasce orarie (Lun-Ven).
-Sabato: recap settimanale. Domenica: pausa.
+Pubblica prompt in modo deterministico su 4 fasce orarie (Lun-Ven, 2 nel weekend).
+Sabato mattina: recap settimanale. Lo slot arriva sempre da --slot (workflow), non dall'ora di esecuzione:
+un ritardo dei cron di GitHub non sposta piu il prompt.
+
+Uso:  python telegram_prompt_publisher.py --slot N      pubblica lo slot N (0 mattino, 1 pausa, 2 sera, 3 notte)
+      python telegram_prompt_publisher.py --recap       recap settimanale
+      python telegram_prompt_publisher.py --dry ...     mostra cosa invierebbe, senza inviare
+      python telegram_prompt_publisher.py --check       verifica token, canale e permessi del bot (sola lettura)
 """
 
 import os
+import sys
 import json
+import time
 import argparse
 import requests
 from pathlib import Path
@@ -23,13 +31,21 @@ PROMPTS_FILE       = Path(__file__).parent / "data" / "aiprompts.json"
 BANNER_FILE        = Path(__file__).parent / "data" / "telegram_banner.png"
 BANNER_PROMO_FILE  = Path(__file__).parent / "data" / "banner_promo_promofinder.png"
 BASE               = f"https://api.telegram.org/bot{TOKEN}"
-REF_DATE           = date(2026, 1, 1)
+REF_DATE           = date(2026, 1, 1)    # vecchia numerazione: 3 slot al giorno (fino al 22/06/2026)
 CROSSPROMO_EVERY   = 10   # ogni N post → promo PromoFinder
+# Nuova numerazione: 4 slot al giorno, continua dal punto in cui il vecchio schema si e fermato
+# (ultimo indice usato 172*3+2 = 518), cosi i prompt gia pubblicati non tornano.
+REF_NEW            = date(2026, 10, 12)
+OLD_END_INDEX      = 518
+SLOTS_PER_DAY      = 4
+MAX_TEXT           = 4000   # limite Telegram 4096 per messaggio
+MAX_CAPTION        = 1000   # limite Telegram 1024 per didascalia
 
 SLOTS = [
     {"id": 0, "label": "Prompt del Mattino",  "emoji": "🌅", "utc_hour": 7},
     {"id": 1, "label": "Prompt della Pausa",  "emoji": "☀️", "utc_hour": 12},
     {"id": 2, "label": "Prompt della Sera",   "emoji": "🌆", "utc_hour": 17},
+    {"id": 3, "label": "Prompt della Notte",  "emoji": "🌙", "utc_hour": 19},
 ]
 
 GIORNI_IT = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"]
@@ -42,25 +58,33 @@ def day_index(d=None):
 
 
 def current_slot():
+    """Solo per uso manuale senza --slot: il workflow passa sempre lo slot esplicito."""
     hour = datetime.now(timezone.utc).hour
     if hour < 10:
         return 0
     elif hour < 15:
         return 1
-    return 2
+    elif hour < 19:
+        return 2
+    return 3
+
+
+def post_number(d, si):
+    """Numero progressivo del post (indice assoluto, prima del modulo sul numero di prompt)."""
+    d = d or date.today()
+    if d < REF_NEW:
+        return day_index(d) * 3 + si
+    return OLD_END_INDEX + 1 + (d - REF_NEW).days * SLOTS_PER_DAY + si
 
 
 def get_prompt(prompts, d=None, slot=None):
-    di = day_index(d)
     si = slot if slot is not None else current_slot()
-    idx = (di * 3 + si) % len(prompts)
-    return prompts[idx], si
+    return prompts[post_number(d, si) % len(prompts)], si
 
 
 def is_crosspromo_turn(slot=None):
-    di = day_index()
     si = slot if slot is not None else current_slot()
-    return (di * 3 + si) % CROSSPROMO_EVERY == 0
+    return post_number(None, si) % CROSSPROMO_EVERY == 0
 
 
 # ── Caricamento prompt ──────────────────────────────────────────────────────
@@ -139,55 +163,116 @@ def build_weekly_recap(prompts):
 
 # ── Invio Telegram ──────────────────────────────────────────────────────────
 
-def send_photo(caption, banner=None):
-    with open(banner or BANNER_FILE, "rb") as img:
-        resp = requests.post(
-            f"{BASE}/sendPhoto",
-            data={"chat_id": CHAT_ID, "caption": caption, "parse_mode": "HTML"},
-            files={"photo": img},
-            timeout=30,
-        )
-    if not resp.ok:
-        print(f"[ERROR] sendPhoto: {resp.status_code} — {resp.text}")
+DRY = False
+
+
+def _post(method, attempts=4, **kwargs):
+    """POST all'API Telegram con ritentativi: rispetta il 429 (retry_after) e gli errori di rete."""
+    last = None
+    for attempt in range(attempts):
+        try:
+            resp = requests.post(f"{BASE}/{method}", **kwargs)
+        except requests.RequestException as e:
+            last = e
+            print(f"[WARN] {method} tentativo {attempt + 1}/{attempts}: {type(e).__name__}")
+            time.sleep(3 * (attempt + 1))
+            continue
+        if resp.ok:
+            return resp.json()
+        if resp.status_code == 429:
+            wait = int(resp.json().get("parameters", {}).get("retry_after", 5))
+            print(f"[WARN] {method} 429: attendo {wait}s")
+            time.sleep(min(wait + 1, 60))
+            continue
+        if resp.status_code >= 500:
+            last = RuntimeError(f"{method} {resp.status_code}")
+            time.sleep(3 * (attempt + 1))
+            continue
+        print(f"[ERROR] {method}: {resp.status_code} — {resp.text[:300]}")
         resp.raise_for_status()
-    return resp.json()
+    raise RuntimeError(f"{method} fallito dopo {attempts} tentativi: {last}")
+
+
+def send_photo(caption, banner=None):
+    caption = cut(caption, MAX_CAPTION)
+    if DRY:
+        print(f"[dry] foto ({(banner or BANNER_FILE).name}) + didascalia:\n{caption}\n")
+        return {}
+    with open(banner or BANNER_FILE, "rb") as img:
+        return _post("sendPhoto", data={"chat_id": CHAT_ID, "caption": caption, "parse_mode": "HTML"},
+                     files={"photo": img}, timeout=30)
 
 
 def send_text(text):
-    resp = requests.post(
-        f"{BASE}/sendMessage",
-        json={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"},
-        timeout=15,
-    )
-    if not resp.ok:
-        print(f"[ERROR] sendMessage: {resp.status_code} — {resp.text}")
-        resp.raise_for_status()
-    return resp.json()
+    text = cut(text, MAX_TEXT)
+    if DRY:
+        print(f"[dry] messaggio:\n{text}\n")
+        return {}
+    return _post("sendMessage", json={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=15)
+
+
+def cut(text, limit):
+    """Tronca senza spezzare un tag HTML a meta."""
+    if len(text) <= limit:
+        return text
+    head = text[: limit - 1]
+    if head.rfind("<") > head.rfind(">"):
+        head = head[: head.rfind("<")]
+    return head.rstrip() + "…"
+
+
+def check():
+    """Sola lettura: token valido, canale raggiungibile, il bot e amministratore con diritto di pubblicare."""
+    me = requests.get(f"{BASE}/getMe", timeout=15).json()
+    if not me.get("ok"):
+        print(f"[KO] token non valido: {me.get('description')}")
+        return 1
+    bot_id = me["result"]["id"]
+    print(f"[OK] bot @{me['result']['username']}")
+    chat = requests.get(f"{BASE}/getChat", params={"chat_id": CHAT_ID}, timeout=15).json()
+    if not chat.get("ok"):
+        print(f"[KO] canale non raggiungibile: {chat.get('description')}")
+        return 1
+    print(f"[OK] canale {chat['result'].get('title')} ({chat['result'].get('username') and '@' + chat['result']['username']})")
+    mem = requests.get(f"{BASE}/getChatMember", params={"chat_id": CHAT_ID, "user_id": bot_id}, timeout=15).json()
+    st = mem.get("result", {})
+    can_post = st.get("status") == "creator" or st.get("can_post_messages")
+    print(f"[{'OK' if can_post else 'KO'}] ruolo del bot: {st.get('status')}, puo pubblicare: {bool(can_post)}")
+    return 0 if can_post else 1
 
 
 # ── Main ────────────────────────────────────────────────────────────────────
 
 def main():
-    if not TOKEN:
-        print("[ERROR] TELEGRAM_BOT_TOKEN mancante nel .env")
-        return
+    if not TOKEN or not CHAT_ID:
+        print("[ERROR] TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID mancanti")
+        raise SystemExit(1)          # esito KO: il workflow risulta fallito e si vede
 
+    global DRY
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")   # emoji ok anche su console Windows
+        except (AttributeError, ValueError):
+            pass
     parser = argparse.ArgumentParser()
-    parser.add_argument("--slot", type=int, choices=[0, 1, 2], default=None,
-                        help="Forza slot: 0=mattino 1=pausa 2=sera")
+    parser.add_argument("--slot", type=int, choices=[0, 1, 2, 3], default=None,
+                        help="Slot: 0=mattino 1=pausa 2=sera 3=notte")
     parser.add_argument("--recap", action="store_true", help="Forza recap settimanale")
+    parser.add_argument("--dry", action="store_true", help="Non invia nulla: stampa i messaggi")
+    parser.add_argument("--check", action="store_true", help="Verifica token, canale e permessi (sola lettura)")
     args = parser.parse_args()
+    DRY = args.dry
+
+    if args.check:
+        raise SystemExit(check())
 
     today     = date.today()
     weekday   = today.weekday()  # 0=Lun, 5=Sab, 6=Dom
 
-    if weekday == 6 and not args.recap and args.slot is None:
-        print("Domenica — nessuna pubblicazione.")
-        return
-
     prompts = load_prompts()
 
-    if weekday == 5 or args.recap:
+    # Il sabato senza --slot (cron del mattino) e il recap; con --slot si pubblica il prompt normale.
+    if args.recap or (weekday == 5 and args.slot is None):
         print("Sabato — invio recap settimanale")
         if BANNER_FILE.exists():
             send_photo("📅 <b>Prompt della Settimana</b>\n\n#aiprompt #promptlab #AI")

@@ -24,7 +24,7 @@ TEXT = (
     "💡 <b>Scopri AI Prompt Lab ITA!</b>\n\n"
     "Prompt selezionati ogni giorno per ChatGPT, Midjourney "
     "e tutti gli strumenti di intelligenza artificiale.\n\n"
-    "Gratis. Ogni giorno. 3 volte al giorno.\n\n"
+    "Gratis. Ogni giorno, anche nel weekend.\n\n"
     "👉 Unisciti al canale e porta la tua AI al livello successivo!\n\n"
     "🔗 <a href=\"https://www.fabiofidone.it\">fabiofidone.it</a>"
 )
